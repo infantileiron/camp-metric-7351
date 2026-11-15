@@ -1,7 +1,7 @@
 from pydantic import BaseModel,Field,model_validator,field_validator
 from typing import Literal,Optional
 from datetime import date
-from src.services.expression import parse
+from src.services.reference import validate_syntax
 class Login(BaseModel):email:str;password:str
 class MetricInput(BaseModel):
  code:str=Field(pattern=r'^[a-z][a-z0-9_]{1,39}$')
@@ -14,7 +14,7 @@ class MetricInput(BaseModel):
  note:str=Field(default='',max_length=2000)
  @field_validator('numerator','denominator')
  @classmethod
- def valid_expression(cls,v):parse(v);return v
+ def valid_expression(cls,v):validate_syntax(v);return v
 class FactInput(BaseModel):
  class_code:str=Field(min_length=1,max_length=50)
  day:date

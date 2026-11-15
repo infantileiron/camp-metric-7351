@@ -4,7 +4,7 @@
 
 ## 真实业务场景
 
-启航训练营经营分析组服务四个线上/线下班级，每天收到班主任的 `启航_班级日报_20261115.xlsx`。原流程由分析员在工作簿计算实到率、结课达成率、退款占比，再把数字抄入经营会纪要。痛点是分子分母的过滤范围不一致、修改公式后旧结论失去依据、数据更正与口径变化无法分清。本项目接收上游班级日事实，替代口径登记/试算/差异解释，给下游经营负责人提供冻结依据。
+启航训练营经营分析组服务四个线上/线下班级，每天收到班主任的 `启航_班级日报_20261115.xlsx`。原流程由分析员在工作簿计算实到率、结课达成率、退款占比，再把数字抄入经营会纪要。痛点是分子分母的过滤范围不一致、净实到等计算被复制到多份口径后修订混用、修改公式后旧结论失去依据、数据更正与口径变化无法分清。本项目接收上游班级日事实，替代口径登记/试算/差异解释，给下游经营负责人提供冻结依据；口径的分子分母可引用指定口径版本的分子或分母表达式，不再整段复制。
 
 三个业务实体：指标定义Metric（代码+版本唯一）、班级日事实Fact（班级+日期唯一）、试算签核快照Snapshot。四页是口径目录、事实校验、口径试算和签核历史；另有登录。后台worker真实计算，签核锁定口径与意见，后续事实修改不改变历史快照。
 
@@ -23,7 +23,7 @@ docker compose up -d --build
 docker compose exec -T backend python -m scripts.seed_demo
 ```
 
-前端 [localhost:18210](http://localhost:18210)，后端 [localhost:19210/docs](http://localhost:19210/docs)，PostgreSQL端口17710。账号为 `admin@demo.local` / `analyst@demo.local` / `viewer@demo.local`，密码均 `Demo123!`。`SEED_DEMO=true`启动自动seed，手动重复不会新增同自然键或覆盖人工修订。种子为四班30日共120条事实（2026-10-17至11-15）、三类口径v1和三账号。
+前端 [localhost:18210](http://localhost:18210)，后端 [localhost:19210/docs](http://localhost:19210/docs)，PostgreSQL端口17710。账号为 `admin@demo.local` / `analyst@demo.local` / `viewer@demo.local`，密码均 `Demo123!`。`SEED_DEMO=true`启动自动seed，手动重复不会新增同自然键或覆盖人工修订。种子为四班30日共120条事实（2026-10-17至11-15）、三类口径v1、引用型净实到口径completion v2（分母=`@attendance:v1.numerator - @refund:v1.numerator`）和三账号。
 
 ## 一天工作剧本
 
@@ -31,8 +31,8 @@ docker compose exec -T backend python -m scripts.seed_demo
 2. 09:00 analyst核对QH-01的2026-11-15事实，满足结课≤实到≤报名、退款≤报名。
 3. 09:10 在事实校验录入新的班级日事实；修订时填写记录ID及完整字段。
 4. 09:20 对completion v1（completed / attended）提交2026-10-17至11-15试算，刷新得到基线。
-5. 09:30 在口径目录创建completion v2，分子completed，分母attended-refunds，写明“净实到”业务解释。
-6. 09:40 新建v2试算，选择v1成功快照作为基线，核对比值差异、变更字段、日期窗和事实checksum。
+5. 09:30 在口径目录查看completion v2（种子内置）：分子completed，分母引用实到率v1分子与退款占比v1分子，展开即“净实到”；点依赖查询看引用链与被引用方。
+6. 09:40 新建v2试算，选择v1成功快照作为基线，核对比值差异、变更字段、依赖变化、日期窗和事实checksum。
 7. 10:00 在签核历史填写不少于8字的解释，说明是否同时存在事实变化。
 8. 10:10 admin签核；该版本不可覆盖。10:20 viewer下载 `camp-metric-<id>.json`。
 
@@ -40,11 +40,13 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 允许字段为 enrolled/attended/completed/refunds，分别是班级日的报名/实到/结课/退款人次。表达式仅允许数字、字段、括号、+ − * /和一元正负；AST逐节点解释，禁止函数、属性访问、下标、幂运算、布尔、SQL和任意代码执行。表达式最多200字符/60个AST节点，常量绝对值≤1000000；非有限值、行级除零、极小分母造成超限结果显式失败。
 
+分子分母可写引用记号 `@代码:v版本.numerator` 或 `@代码:v版本.denominator`，引用指定口径版本的分子或分母表达式，不再整段复制净实到等计算。试算前逐层展开为对方表达式（最深8层、展开后总计不超过2000个AST节点），班级日事实仍按引用处——即本口径该侧——的授课方式过滤，分子分母各自聚合后相除。缺失引用、引用成环、行级（含被引用表达式内的间接）除零都会带来源链报错，形如 `completion v3 分子 → refund v1 分母`，可直接定位到出问题的口径版本与部位。保存口径与提交试算时都会校验引用；口径目录的依赖查询展示整条引用链、展开结果及被哪些口径引用。
+
 按日期窗过滤事实，再按分子与分母各自的授课方式过滤；每行执行对应表达式，分子求和/分母求和，得到ratio。页面乘100展示百分比；不是日比率的简单平均。例如两班结课6/5、实到8/10，合计为11/18；v2扣除退款1/2后是11/15，绝对差11/90。分子分母过滤不同可能超过100%或为负，需人工解释，不自动截断。
 
-外层总分母为0，value=null并显示undefined，不伪装0，可导出诊断但禁止签核。没有事实、非法行表达式使任务failed，修正后重新试算。每次冻结口径、事实、基线、日期窗及checksum。版本比较仅允许同指标代码，显示字段变化、绝对比值差和日期/事实是否一致；数据改变时不能把全部差异归因于口径。
+外层总分母为0，value=null并显示undefined，不伪装0，可导出诊断但禁止签核。没有事实、非法行表达式使任务failed，修正后重新试算。提交试算即在独立的REPEATABLE READ事务内把口径、整条依赖闭包、事实、基线、日期窗一次性冻结进快照（同一完整时点，并发修订要么全见要么全不见），从排队到完成worker只依据冻结数据重展开计算，并记录checksum。导出JSON含展开后的表达式、冻结依赖与全部事实，可独立复算：页面下载后用 `docker compose exec -T backend python -m scripts.recalc_export /artifacts/<id>.json`（或对下载的导出文件）逐项核对比值、分组与checksum。版本比较仅允许同指标代码，显示字段变化、依赖变化、绝对比值差和日期/事实是否一致；数据改变时不能把全部差异归因于口径。
 
-签核需要已成功、非undefined、业务解释至少8字且口径仍与试算一致；试算后修订口径必须重算。签核后锁定口径版本和意见，事实更正不改旧快照。已有冻结版本可再次以新事实试算，但仍保留各次输入。
+签核需要已成功、非undefined、业务解释至少8字且口径仍与试算一致；试算后修订口径必须重算。签核时核对整条依赖链（含间接依赖）是否仍与冻结一致，任一环节变更即视为过期试算，拒绝并要求重新试算；与修订争抢时按id升序对整链加行锁，全部一致才一起锁定、任一不符则全部不锁，避免半链被改。签核后锁定整链口径版本和意见，事实更正不改旧快照。已有冻结版本可再次以新事实试算，但仍保留各次输入。
 
 ## 工程、本地开发与范围
 
@@ -61,4 +63,4 @@ backend等待db/redis健康，worker再等backend，frontend等backend；恰好�
 
 目录按backend/src的routes/controllers/services/models/schemas/middlewares/config/utils及frontend/src的api/stores/pages/components/hooks/utils/constants/types/router拆分。共享表格、字段、状态标签；表单hooks与HTML转义；请求ID/安全头中间件、业务审计和全局错误处理。枚举ROLES/STATES/MODES/APPROVALS/FIELDS位于后端constants/enums.py、schemas/business.py和前端constants/enums.js。ORM建初表，migrations/001_initial.sql保留实际DDL；无在线版本迁移执行器。
 
-小型范围：逐条表单/API录入，无Excel批导、删除、分页或跨指标引用；单worker，启动恢复待处理任务。班级日事实是人次，不能解释为去重学员留存。签核只在站内，不外发邮件/电子签章。Google Fonts依赖网络，离线回退serif/sans-serif。测试证据在 `../../test-artifacts/gb-3111/TESTING.md`，源码无截图/日志。MIT License见LICENSE。
+小型范围：逐条表单/API录入，无Excel批导、删除或分页；跨口径引用限定分子/分母表达式级并固定到具体版本；单worker，启动恢复待处理任务。班级日事实是人次，不能解释为去重学员留存。签核只在站内，不外发邮件/电子签章。Google Fonts依赖网络，离线回退serif/sans-serif。测试证据在 `../../test-artifacts/gb-3111/TESTING.md`，源码无截图/日志。MIT License见LICENSE。
